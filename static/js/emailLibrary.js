@@ -729,13 +729,15 @@ export function initEmailLibrary(config) {
 export function isOpen() { return state._libOpen; }
 
 function _emailProPreference() {
-  // Default to Email Pro on first run. Users can explicitly opt out with
-  // localStorage.setItem('odysseus.emailPro.enabled', '0') or the Legacy toggle.
+  const mode = localStorage.getItem('odysseus.email.mode');
+  if (mode === 'simple') return false;
+  if (mode === 'pro') return true;
   const value = localStorage.getItem('odysseus.emailPro.enabled');
   return value == null ? true : value !== '0';
 }
 
 function _setEmailProPreference(enabled) {
+  localStorage.setItem('odysseus.email.mode', enabled ? 'pro' : 'simple');
   localStorage.setItem('odysseus.emailPro.enabled', enabled ? '1' : '0');
 }
 

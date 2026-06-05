@@ -36454,3 +36454,203 @@ body.theme-frosted .modal {
 .email-pro-tag-newsletter { border-color: rgba(138,223,255,.34) !important; background: rgba(138,223,255,.09); }
 .email-pro-tag-marketing { border-color: rgba(180,130,255,.32) !important; background: rgba(180,130,255,.10); }
 .email-pro-tag-attachment { border-color: rgba(255,255,255,.18) !important; background: rgba(255,255,255,.06); }
+
+/* Email Pro hotdrop: backend-driven multi-account nav, tags, and table mode */
+.email-pro-mode-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--border, #333);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+}
+.email-pro-mode-toggle .active {
+  background: rgba(125, 220, 255, 0.18);
+  border-color: rgba(125, 220, 255, 0.45);
+}
+.email-pro-tags {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.email-pro-tag,
+.email-pro-folder {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+}
+.email-pro-tag span:last-child,
+.email-pro-folder-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.email-pro-tag small,
+.email-pro-folder-text small,
+.email-pro-row-account {
+  opacity: 0.72;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.email-pro-sidebar-empty {
+  opacity: 0.65;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.email-pro-row-account {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 999px;
+}
+.email-pro-view-table .email-pro-list {
+  gap: 0;
+}
+.email-pro-message-table {
+  display: grid;
+  grid-template-columns: 86px minmax(130px, 220px) minmax(220px, 1fr) minmax(90px, 170px) 72px;
+  gap: 12px;
+  align-items: center;
+  min-height: 48px;
+  padding: 6px 12px;
+}
+.email-pro-table-from,
+.email-pro-table-subject,
+.email-pro-table-tags,
+.email-pro-table-date {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.email-pro-table-from {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.email-pro-table-subject {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.email-pro-table-subject small {
+  opacity: 0.66;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.email-pro-table-tags {
+  display: flex;
+  gap: 4px;
+}
+.email-pro-table-tags span {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(125, 220, 255, 0.12);
+  border: 1px solid rgba(125, 220, 255, 0.22);
+}
+.email-pro-table-date {
+  text-align: right;
+  opacity: 0.78;
+  font-size: 12px;
+}
+@media (max-width: 900px) {
+  .email-pro-message-table {
+    grid-template-columns: 72px minmax(140px, 1fr) 64px;
+  }
+  .email-pro-table-tags,
+  .email-pro-table-from .email-pro-row-account {
+    display: none;
+  }
+}
+
+
+/* Mail Pro hotfix: prevent date/unread marker collision in card and table rows. */
+.email-pro-message {
+  padding-right: 34px;
+}
+.email-pro-message.unread::after {
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.email-pro-row-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  column-gap: 12px;
+}
+.email-pro-row-sender {
+  min-width: 0;
+}
+.email-pro-row-date {
+  min-width: max-content;
+  padding-right: 4px;
+  white-space: nowrap;
+}
+.email-pro-message-table {
+  padding-right: 34px;
+}
+.email-pro-table-date {
+  min-width: 72px;
+  padding-right: 8px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Mail Pro hotfix: render real HTML emails with fewer template breakages. */
+.email-pro-reader-body.email-pro-html-body {
+  overflow-x: auto;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  background: #1b1d20;
+}
+.email-pro-reader-body.email-pro-html-body table {
+  max-width: 100%;
+}
+.email-pro-reader-body.email-pro-html-body img {
+  max-width: 100%;
+  height: auto;
+}
+.email-pro-reader-body.email-pro-html-body img:not([src]) {
+  display: inline-block;
+  min-width: 28px;
+  min-height: 20px;
+  border: 1px dashed rgba(255,255,255,.22);
+  border-radius: 4px;
+  vertical-align: middle;
+}
+.email-pro-reader-body.email-pro-html-body a {
+  color: #8adfff;
+}
+
+
+/* Mail Pro hotfix: focus reader needs an explicit return path. */
+.email-pro-reader-back {
+  display: inline-flex;
+}
+.email-pro-pane-focus .email-pro-reader-back {
+  border-color: rgba(138,223,255,.45);
+  background: rgba(138,223,255,.12);
+}
+
+/* Mail Pro hotfix: inline cid image behavior after backend rewrite. */
+.email-pro-reader-body.email-pro-html-body img[src*="/api/email/inline/"] {
+  background: transparent;
+}
+.email-pro-reader-body.email-pro-html-body img[data-missing-cid-src]::after {
+  content: attr(alt);
+}
+
+
+/* Mail Pro hotfix: proxied remote email images. */
+.email-pro-reader-body.email-pro-html-body img[src*="/api/email/pro/image-proxy"] {
+  background: transparent;
+}

@@ -24,6 +24,10 @@ import html
 from html.parser import HTMLParser as _HTMLParser
 import logging
 import uuid
+import urllib.request
+import urllib.parse
+import ipaddress
+import socket
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +35,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from fastapi import APIRouter, Query, UploadFile, File, BackgroundTasks, HTTPException, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from src.llm_core import llm_call_async
 from src.upload_limits import read_upload_limited
@@ -961,6 +965,174 @@ def setup_email_routes():
                 except Exception:
                     pass
 
+
+
+    def _email_pro_account_rows(owner: str):
+        """Return enabled email accounts visible to this owner, matching /accounts scoping."""
+        from core.database import SessionLocal, EmailAccount
+        from sqlalchemy import and_, or_
+        db = SessionLocal()
+        try:
+            q = db.query(EmailAccount).filter(EmailAccount.enabled == True)  # noqa: E712
+            if owner:
+                unowned = or_(EmailAccount.owner == None, EmailAccount.owner == "")  # noqa: E711
+                same_mailbox = or_(EmailAccount.imap_user == owner, EmailAccount.from_address == owner)
+                q = q.filter(or_(EmailAccount.owner == owner, and_(unowned, same_mailbox)))
+            rows = q.order_by(EmailAccount.is_default.desc(), EmailAccount.created_at.asc()).all()
+            return [{
+                "id": r.id,
+                "name": r.name or r.from_address or r.imap_user or "Account",
+                "is_default": bool(r.is_default),
+                "enabled": bool(r.enabled),
+                "imap_user": r.imap_user or "",
+                "from_address": r.from_address or "",
+            } for r in rows]
+        finally:
+            db.close()
+
+    def _email_pro_list_folders_for_account(account_id: str | None, owner: str) -> list[str]:
+        with _imap(account_id, owner=owner) as conn:
+            _raw, names = _list_imap_folders(conn)
+        return names or ["INBOX"]
+
+    def _email_pro_tags(owner: str, account_id: str | None = None) -> list[str]:
+        """Return Mail Pro tag filters.
+
+        Legacy mail always exposes the built-in classifier tag filters even
+        before the cache has rows. Mail Pro should do the same, then append any
+        additional tags discovered from the email_tags cache.
+        """
+        preferred = ["Urgent", "Reply soon", "Spam", "Newsletter", "Marketing"]
+        tags = set(preferred)
+        try:
+            accounts = _email_pro_account_rows(owner)
+            account_lookup = {str(a.get("id")): a for a in accounts}
+            aliases = [owner or ""]
+            if account_id:
+                a = account_lookup.get(str(account_id)) or {}
+                aliases.extend([a.get("imap_user") or "", a.get("from_address") or ""])
+            else:
+                for a in accounts:
+                    aliases.extend([a.get("imap_user") or "", a.get("from_address") or ""])
+            aliases = [str(a or "").strip() for a in aliases if str(a or "").strip()]
+            if aliases:
+                placeholders = ",".join("?" * len(aliases))
+                conn = _sql3.connect(SCHEDULED_DB)
+                try:
+                    rows = conn.execute(
+                        f"SELECT tags, spam_verdict FROM email_tags WHERE owner IN ({placeholders})",
+                        aliases,
+                    ).fetchall()
+                finally:
+                    conn.close()
+                for raw, spam in rows:
+                    if spam:
+                        tags.add("Spam")
+                    try:
+                        vals = json.loads(raw or "[]")
+                    except Exception:
+                        vals = []
+                    if isinstance(vals, list):
+                        for t in vals:
+                            name = str(t or "").strip()
+                            if not name:
+                                continue
+                            key = name.lower().replace("_", "-").replace(" ", "-")
+                            if key == "promo":
+                                name = "Marketing"
+                            elif key == "reply-soon":
+                                name = "Reply soon"
+                            else:
+                                name = name.replace("_", " ").strip().title()
+                            tags.add(name)
+        except Exception as exc:
+            logger.debug(f"Email Pro tag load skipped: {exc}")
+        lower = {x.lower(): x for x in tags}
+        ordered = [lower[t.lower()] for t in preferred if t.lower() in lower]
+        used = {t.lower() for t in ordered}
+        ordered.extend(sorted([t for t in tags if t.lower() not in used], key=str.lower))
+        return ordered
+
+    @router.get("/pro/nav")
+    async def email_pro_nav(account_id: str | None = Query(None), owner: str = Depends(require_owner)):
+        accounts = _email_pro_account_rows(owner)
+        views = [
+            {"id": "all", "label": "All", "description": "All mail in the selected folder"},
+            {"id": "unread", "label": "Unread", "description": "Unread messages"},
+            {"id": "favorites", "label": "Starred", "description": "Flagged messages"},
+            {"id": "undone", "label": "Undone", "description": "Needs action"},
+            {"id": "unanswered", "label": "Unanswered", "description": "No reply yet"},
+            {"id": "has-attachments", "label": "Attachments", "description": "Messages with files"},
+        ]
+        folder_items = []
+        errors = []
+        if account_id:
+            account = next((a for a in accounts if str(a.get("id")) == str(account_id)), None)
+            names = _email_pro_list_folders_for_account(account_id, owner)
+            folder_items = [{
+                "name": n, "account_id": account_id,
+                "account_name": (account or {}).get("name") or "Account", "unified": False,
+            } for n in names]
+        else:
+            folder_items.append({"name": "INBOX", "account_id": None, "account_name": "All accounts", "unified": True})
+            seen = {("", "INBOX")}
+            for account in accounts:
+                try:
+                    for n in _email_pro_list_folders_for_account(account.get("id"), owner):
+                        key = (str(account.get("id") or ""), str(n))
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        folder_items.append({
+                            "name": n, "account_id": account.get("id"),
+                            "account_name": account.get("name") or account.get("from_address") or account.get("imap_user") or "Account",
+                            "unified": False,
+                        })
+                except Exception as exc:
+                    errors.append({"account_id": account.get("id"), "error": str(exc)[:180]})
+        return {"accounts": accounts, "folders": [item["name"] for item in folder_items], "folder_items": folder_items, "views": views, "tags": _email_pro_tags(owner, account_id), "errors": errors}
+
+    @router.get("/pro/list")
+    async def email_pro_list(
+        folder: str = Query("INBOX"), limit: int = Query(50), offset: int = Query(0),
+        filter: str = Query("all"), account_id: str | None = Query(None),
+        has_attachments: int = Query(0), cache_bust: str | None = Query(None, alias="_"),
+        owner: str = Depends(require_owner),
+    ):
+        _deferred = getattr(_start_poller, '_deferred', None)
+        if _deferred:
+            await _deferred()
+        if account_id:
+            result = await _asyncio.to_thread(_list_emails_sync, folder, limit, offset, filter, account_id, None, bool(has_attachments), owner)
+            for e in result.get("emails") or []:
+                e["account_id"] = account_id
+            return result
+        accounts = _email_pro_account_rows(owner)
+        if not accounts:
+            result = await _asyncio.to_thread(_list_emails_sync, folder, limit, offset, filter, None, None, bool(has_attachments), owner)
+            for e in result.get("emails") or []:
+                e["account_id"] = None; e["account_name"] = "Default account"
+            return result
+        per_account_limit = max(limit + offset, limit)
+        merged = []
+        total = 0
+        errors = []
+        for account in accounts:
+            aid = account.get("id")
+            try:
+                result = await _asyncio.to_thread(_list_emails_sync, folder, per_account_limit, 0, filter, aid, None, bool(has_attachments), owner)
+                if result.get("error"):
+                    errors.append({"account_id": aid, "error": result.get("error")})
+                    continue
+                total += int(result.get("total") or 0)
+                for e in result.get("emails") or []:
+                    e["account_id"] = aid
+                    e["account_name"] = account.get("name") or account.get("from_address") or account.get("imap_user") or "Account"
+                    merged.append(e)
+            except Exception as exc:
+                errors.append({"account_id": aid, "error": str(exc)[:180]})
+        merged.sort(key=lambda x: x.get("date_epoch") or 0.0, reverse=True)
+        return {"emails": merged[offset:offset + limit], "total": total, "folder": folder, "offset": offset, "unified": True, "errors": errors}
     @router.get("/list")
     async def list_emails(
         folder: str = Query("INBOX"),
@@ -1411,6 +1583,118 @@ def setup_email_routes():
         except Exception as e:
             logger.error(f"Failed to list attachments for {uid}: {e}")
             return {"attachments": [], "error": "Mail operation failed"}
+
+
+
+    def _email_pro_remote_image_allowed(url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return False
+            host = (parsed.hostname or "").strip()
+            if not host:
+                return False
+            # Block localhost/private network fetches to avoid SSRF through email HTML.
+            infos = socket.getaddrinfo(host, None)
+            for info in infos:
+                ip = ipaddress.ip_address(info[4][0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    @router.get("/pro/image-proxy")
+    async def email_pro_image_proxy(url: str = Query(...), owner: str = Depends(require_owner)):
+        """Safely proxy remote images for Mail Pro HTML emails.
+
+        Some email providers/templates use hotlinked images that fail inside the
+        app because of CSP/referrer/mixed context/browser restrictions. This
+        endpoint fetches public http(s) images server-side after SSRF checks and
+        returns them as image bytes.
+        """
+        try:
+            target = (url or "").strip()
+            if not _email_pro_remote_image_allowed(target):
+                return Response(status_code=400)
+            req = urllib.request.Request(
+                target,
+                headers={
+                    "User-Agent": "Mozilla/5.0 Odysseus-MailPro/1.0",
+                    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                content_type = (resp.headers.get("Content-Type") or "application/octet-stream").split(";")[0].strip().lower()
+                if not (content_type.startswith("image/") or content_type in ("application/octet-stream", "binary/octet-stream")):
+                    return Response(status_code=415)
+                data = resp.read(8 * 1024 * 1024 + 1)
+                if len(data) > 8 * 1024 * 1024:
+                    return Response(status_code=413)
+                if content_type in ("application/octet-stream", "binary/octet-stream"):
+                    content_type = "image/*"
+                return Response(
+                    content=data,
+                    media_type=content_type,
+                    headers={"Cache-Control": "private, max-age=86400"},
+                )
+        except Exception as e:
+            logger.debug(f"Mail Pro image proxy failed: {e}")
+            return Response(status_code=404)
+
+    @router.get("/inline/{uid}/{cid}")
+    async def inline_email_part(
+        uid: str,
+        cid: str,
+        folder: str = Query("INBOX"),
+        account_id: str | None = Query(None),
+        owner: str = Depends(require_owner),
+    ):
+        """Return an inline MIME part by Content-ID/Content-Location/filename.
+
+        HTML emails often reference embedded images as cid:... URLs. The browser
+        cannot resolve those directly, so Mail Pro rewrites cid: URLs to this
+        owner-scoped endpoint.
+        """
+        try:
+            wanted = (cid or "").strip().strip("<>").lower()
+            if not wanted:
+                return Response(status_code=404)
+            with _imap(account_id, owner=owner) as conn:
+                conn.select(_q(folder), readonly=True)
+                status, msg_data = _imap_uid_fetch(conn, uid, "(RFC822)")
+            if status != "OK" or not msg_data:
+                return Response(status_code=404)
+            raw = msg_data[0][1]
+            msg = email_mod.message_from_bytes(raw)
+
+            for part in msg.walk():
+                if part.is_multipart():
+                    continue
+                content_id = str(part.get("Content-ID", "") or "").strip().strip("<>").lower()
+                content_location = str(part.get("Content-Location", "") or "").strip().lower()
+                filename = part.get_filename()
+                decoded_filename = _decode_header(filename).strip().lower() if filename else ""
+                candidates = {content_id, content_location, decoded_filename}
+                candidates = {c for c in candidates if c}
+                if wanted not in candidates:
+                    continue
+                payload = part.get_payload(decode=True)
+                if not payload:
+                    return Response(status_code=404)
+                media_type = part.get_content_type() or "application/octet-stream"
+                return Response(
+                    content=payload,
+                    media_type=media_type,
+                    headers={
+                        "Cache-Control": "private, max-age=3600",
+                        "Content-Disposition": "inline",
+                    },
+                )
+            return Response(status_code=404)
+        except Exception as e:
+            logger.error(f"Failed to resolve inline email image {uid}/{cid}: {e}")
+            return Response(status_code=404)
 
     @router.get("/attachment/{uid}/{index}")
     async def download_attachment(uid: str, index: int, folder: str = Query("INBOX"), account_id: str | None = Query(None), owner: str = Depends(require_owner)):

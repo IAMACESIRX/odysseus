@@ -20,6 +20,9 @@ const LIMIT = 50;
 const DENSITY_KEY = 'odysseus.emailPro.density';
 const PANE_KEY = 'odysseus.emailPro.readerPane';
 const ENABLED_KEY = 'odysseus.emailPro.enabled';
+const MODE_KEY = 'odysseus.email.mode';
+const VIEW_MODE_KEY = 'odysseus.emailPro.viewMode';
+const DEFAULT_TAGS = ['Urgent', 'Reply soon', 'Spam', 'Newsletter', 'Marketing'];
 
 const st = {
   open: false,
@@ -27,7 +30,11 @@ const st = {
   accountId: null,
   accountName: 'All',
   folders: ['INBOX'],
+  folderItems: [{ name: 'INBOX', account_id: null, account_name: 'All accounts', unified: true }],
+  tags: DEFAULT_TAGS.slice(),
+  views: [],
   folder: 'INBOX',
+  folderAccountId: null,
   filter: 'all',
   query: '',
   messages: [],
@@ -37,24 +44,77 @@ const st = {
   loadingMore: false,
   selected: new Set(),
   activeUid: null,
+  activeKey: null,
   activeMessage: null,
   bodies: new Map(),
   foldersLoading: false,
   density: localStorage.getItem(DENSITY_KEY) || 'comfortable',
   readerPane: localStorage.getItem(PANE_KEY) || 'right',
+  viewMode: localStorage.getItem(VIEW_MODE_KEY) || 'cards',
   searchTimer: null,
 };
 
-function acctQS(accountId = st.accountId) {
+function effectiveAccountId(message = null) {
+  return message?.account_id || st.folderAccountId || st.accountId || null;
+}
+
+function acctQS(accountId = effectiveAccountId()) {
   return accountId ? `&account_id=${encodeURIComponent(accountId)}` : '';
 }
 
-function folderQS() {
-  return `folder=${encodeURIComponent(st.folder)}${acctQS()}`;
+function folderQS(message = null) {
+  const params = new URLSearchParams();
+  params.set('folder', message?.folder || st.folder);
+  const accountId = effectiveAccountId(message);
+  if (accountId) params.set('account_id', accountId);
+  return params.toString();
 }
 
-function messageKey(uid, folder = st.folder, accountId = st.accountId) {
-  return `${accountId || ''}|${folder}|${uid}`;
+function messageKey(message) {
+  if (!message) return '';
+  return `${message.account_id || effectiveAccountId(message) || ''}|${message.folder || st.folder}|${message.uid}`;
+}
+
+function currentFolderItem() {
+  return (st.folderItems || []).find(item => String(item.name) === String(st.folder) && String(item.account_id || '') === String(st.folderAccountId || '')) || null;
+}
+
+function filterToLabel(filter) {
+  if (!filter || filter === 'all') return 'All';
+  if (filter.startsWith('tag:')) return filter.slice(4);
+  return filter.replace(/^has-attachments$/, 'Attachments').replace(/-/g, ' ').replace(/\w/g, c => c.toUpperCase());
+}
+
+function tagFilterValue(tag) {
+  return `tag:${String(tag || '').trim().toLowerCase().replace(/\s+/g, '-')}`;
+}
+
+function mergeTags(tags) {
+  const seen = new Set();
+  const out = [];
+  [...DEFAULT_TAGS, ...(Array.isArray(tags) ? tags : [])].forEach(tag => {
+    const label = String(tag || '').trim();
+    if (!label) return;
+    const key = tagFilterValue(label).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(label);
+  });
+  return out;
+}
+
+function sortedFolderItems(items) {
+  const list = Array.isArray(items) ? items.slice() : [];
+  const names = list.map(i => i.name);
+  const ordered = sortedFolders(names);
+  const priorityNames = Array.isArray(ordered) ? ordered : [...(ordered.priority || []), ...(ordered.others || [])];
+  const rank = new Map(priorityNames.map((name, idx) => [name, idx]));
+  return list.sort((a, b) => {
+    const ra = rank.has(a.name) ? rank.get(a.name) : 9999;
+    const rb = rank.has(b.name) ? rank.get(b.name) : 9999;
+    if (ra !== rb) return ra - rb;
+    return String(a.account_name || '').localeCompare(String(b.account_name || '')) || String(a.name).localeCompare(String(b.name));
+  });
 }
 
 function fmtDate(m) {
@@ -92,6 +152,7 @@ export async function openEmailProLibrary(opts = {}) {
   st.selected.clear();
   st.activeUid = opts.uid || null;
   st.activeMessage = null;
+  st.activeKey = null;
   st.messages = [];
   st.total = 0;
   st.offset = 0;
@@ -102,7 +163,7 @@ export async function openEmailProLibrary(opts = {}) {
 
   const node = document.createElement('div');
   node.id = 'email-pro-modal';
-  node.className = `modal email-pro-modal email-pro-density-${st.density} email-pro-pane-${st.readerPane}`;
+  node.className = `modal email-pro-modal email-pro-density-${st.density} email-pro-pane-${st.readerPane} email-pro-view-${st.viewMode}`;
   node.innerHTML = renderShell();
   document.body.appendChild(node);
 
@@ -132,7 +193,7 @@ function renderShell() {
           </div>
         </div>
         <div class="email-pro-title-actions">
-          <button class="email-pro-icon-btn" id="email-pro-legacy" title="Switch to the legacy email view">Legacy</button>
+          <div class="email-pro-mode-toggle" role="group" aria-label="Mail mode"><button class="email-pro-icon-btn" id="email-pro-mode-simple" title="Switch to simple mail">Simple</button><button class="email-pro-icon-btn active" id="email-pro-mode-pro" title="Email Pro is active">Pro</button></div>
           <button class="email-pro-icon-btn" id="email-pro-min" title="Minimize">—</button>
           <button class="email-pro-icon-btn danger" id="email-pro-close" title="Close">×</button>
         </div>
@@ -153,6 +214,10 @@ function renderShell() {
           <option value="compact">Compact</option>
           <option value="comfortable">Comfortable</option>
           <option value="spacious">Spacious</option>
+        </select>
+        <select id="email-pro-view-mode" class="email-pro-select" title="Message list view">
+          <option value="cards">Cards</option>
+          <option value="table">Table</option>
         </select>
         <select id="email-pro-pane-mode" class="email-pro-select" title="Reader pane">
           <option value="right">Right pane</option>
@@ -175,6 +240,8 @@ function renderShell() {
         <aside class="email-pro-sidebar">
           <div class="email-pro-section-label">Accounts</div>
           <div id="email-pro-accounts" class="email-pro-accounts"></div>
+          <div class="email-pro-section-label tags-label">Tags</div>
+          <div id="email-pro-tags" class="email-pro-tags"></div>
           <div class="email-pro-section-label folders-label">Folders</div>
           <div id="email-pro-folders" class="email-pro-folders"></div>
         </aside>
@@ -205,8 +272,8 @@ function renderShell() {
 function wireShell(root) {
   el('email-pro-close')?.addEventListener('click', closeEmailProLibrary);
   el('email-pro-min')?.addEventListener('click', () => root.classList.toggle('email-pro-minimized'));
-  el('email-pro-legacy')?.addEventListener('click', async () => {
-    // User-requested toggle: remember Legacy until they click Email Pro again.
+  el('email-pro-mode-simple')?.addEventListener('click', async () => {
+    localStorage.setItem(MODE_KEY, 'simple');
     localStorage.setItem(ENABLED_KEY, '0');
     closeEmailProLibrary();
     const legacy = await import('../emailLibrary.js');
@@ -217,7 +284,7 @@ function wireShell(root) {
   el('email-pro-load-more')?.addEventListener('click', () => loadMore());
   el('email-pro-select-all')?.addEventListener('change', e => {
     st.selected.clear();
-    if (e.target.checked) st.messages.forEach(m => st.selected.add(String(m.uid)));
+    if (e.target.checked) st.messages.forEach(m => st.selected.add(messageKey(m))); 
     renderMessageList();
     updateBulkState();
   });
@@ -227,6 +294,14 @@ function wireShell(root) {
     localStorage.setItem(DENSITY_KEY, st.density);
     modal()?.classList.remove('email-pro-density-compact', 'email-pro-density-comfortable', 'email-pro-density-spacious');
     modal()?.classList.add(`email-pro-density-${st.density}`);
+  });
+  el('email-pro-view-mode').value = st.viewMode;
+  el('email-pro-view-mode')?.addEventListener('change', e => {
+    st.viewMode = e.target.value === 'table' ? 'table' : 'cards';
+    localStorage.setItem(VIEW_MODE_KEY, st.viewMode);
+    modal()?.classList.remove('email-pro-view-cards', 'email-pro-view-table');
+    modal()?.classList.add(`email-pro-view-${st.viewMode}`);
+    renderMessageList();
   });
   el('email-pro-pane-mode').value = st.readerPane;
   el('email-pro-pane-mode')?.addEventListener('change', e => {
@@ -250,6 +325,7 @@ function wireShell(root) {
     btn.addEventListener('click', () => {
       st.filter = btn.dataset.filter;
       root.querySelectorAll('.email-pro-chip').forEach(b => b.classList.toggle('active', b === btn));
+      renderTags();
       loadMessages({ reset: true });
     });
   });
@@ -293,38 +369,48 @@ function setStatus(text, busy = false) {
   s.classList.toggle('busy', busy);
 }
 
-async function loadAccounts() {
+async function loadNav(opts = {}) {
+  st.foldersLoading = true;
+  renderAccounts();
+  renderTags();
+  renderFolders();
   try {
-    const res = await fetch(`${API_BASE}/api/email/accounts`, { credentials: 'same-origin' });
+    const qs = st.accountId ? `?account_id=${encodeURIComponent(st.accountId)}` : '';
+    const res = await fetch(`${API_BASE}/api/email/pro/nav${qs}`, { credentials: 'same-origin' });
     const data = await res.json();
+    if (data.error) throw new Error(data.error);
     st.accounts = data.accounts || [];
-    if (st.accounts.length && !st.accountId) {
-      const def = st.accounts.find(a => a.is_default) || st.accounts[0];
-      st.accountId = def.id;
+    st.folderItems = sortedFolderItems(data.folder_items || (data.folders || ['INBOX']).map(name => ({ name, account_id: st.accountId || null, account_name: st.accountName || 'Account' })));
+    st.folders = st.folderItems.map(item => item.name);
+    const dynamicTags = Array.isArray(data.tags) ? data.tags : [];
+    st.tags = mergeTags(dynamicTags);
+    st.views = Array.isArray(data.views) ? data.views : [];
+    const hasCurrent = st.folderItems.some(item => String(item.name) === String(st.folder) && String(item.account_id || '') === String(st.folderAccountId || ''));
+    if (!hasCurrent) {
+      const preferred = st.folderItems.find(item => String(item.name).toUpperCase() === 'INBOX' && (!st.accountId ? !item.account_id : String(item.account_id) === String(st.accountId))) || st.folderItems[0];
+      st.folder = preferred?.name || 'INBOX';
+      st.folderAccountId = preferred?.account_id || null;
     }
-    renderAccounts();
   } catch (err) {
-    console.error('Email Pro account load failed', err);
+    console.error('Email Pro navigation load failed', err);
     st.accounts = [];
+    st.folderItems = [{ name: 'INBOX', account_id: null, account_name: 'All accounts', unified: true }];
+    st.folders = ['INBOX'];
+    st.tags = DEFAULT_TAGS.slice();
+  } finally {
+    st.foldersLoading = false;
     renderAccounts();
+    renderTags();
+    renderFolders();
   }
 }
 
+async function loadAccounts(opts = {}) {
+  await loadNav(opts);
+}
+
 async function loadFolders() {
-  st.foldersLoading = true;
-  renderFolders();
-  try {
-    const res = await fetch(`${API_BASE}/api/email/folders?_=${Date.now()}${acctQS()}`, { credentials: 'same-origin' });
-    const data = await res.json();
-    st.folders = sortedFolders(data.folders || ['INBOX']);
-    if (!st.folders.includes(st.folder)) st.folder = st.folders[0] || 'INBOX';
-  } catch (err) {
-    console.error('Email Pro folder load failed', err);
-    st.folders = ['INBOX'];
-  } finally {
-    st.foldersLoading = false;
-    renderFolders();
-  }
+  await loadNav();
 }
 
 async function loadMessages({ reset = false, force = false } = {}) {
@@ -336,6 +422,7 @@ async function loadMessages({ reset = false, force = false } = {}) {
     st.total = 0;
     st.selected.clear();
     st.activeUid = null;
+    st.activeKey = null;
     st.activeMessage = null;
     renderReaderEmpty();
   }
@@ -347,10 +434,11 @@ async function loadMessages({ reset = false, force = false } = {}) {
     params.set('limit', String(LIMIT));
     params.set('offset', String(st.offset));
     params.set('filter', st.filter === 'has-attachments' ? 'all' : st.filter);
-    if (st.accountId) params.set('account_id', st.accountId);
+    const accountId = effectiveAccountId();
+    if (accountId) params.set('account_id', accountId);
     if (st.filter === 'has-attachments') params.set('has_attachments', '1');
     if (force) params.set('_', String(Date.now()));
-    const endpoint = st.query ? '/api/email/search' : '/api/email/list';
+    const endpoint = st.query ? '/api/email/search' : '/api/email/pro/list';
     if (st.query) {
       params.set('q', st.query);
       params.set('limit', String(LIMIT));
@@ -369,7 +457,7 @@ async function loadMessages({ reset = false, force = false } = {}) {
     renderAll();
     const pending = st.activeUid || null;
     if (pending) {
-      const msg = st.messages.find(m => String(m.uid) === String(pending));
+      const msg = st.messages.find(m => String(m.uid) === String(pending) || messageKey(m) === pending);
       if (msg) selectMessage(msg);
     }
   } catch (err) {
@@ -398,6 +486,7 @@ async function loadMore() {
 function renderAll() {
   renderAccounts();
   renderFolders();
+  renderTags();
   renderMessageList();
   updateBulkState();
 }
@@ -405,21 +494,28 @@ function renderAll() {
 function renderAccounts() {
   const box = el('email-pro-accounts');
   if (!box) return;
-  const accounts = st.accounts.length ? st.accounts : [{ id: '', name: 'Default account', from_address: '', is_default: true }];
+  const accounts = [{ id: '', name: 'All (default)', from_address: 'Unified inbox', is_all: true }, ...(st.accounts || [])];
   box.innerHTML = accounts.map(a => {
     const active = String(st.accountId || '') === String(a.id || '');
     const label = a.name || a.from_address || a.imap_user || 'Account';
-    const sub = a.from_address || a.imap_user || (a.is_default ? 'Default' : '');
-    return `<button class="email-pro-account ${active ? 'active' : ''}" data-account-id="${_esc(a.id || '')}">
-      <span class="email-pro-avatar" style="--avatar-color:${_senderColor(label)}">${_esc(_initials(label))}</span>
+    const sub = a.is_all ? 'Unified inbox' : (a.from_address || a.imap_user || (a.is_default ? 'Default' : ''));
+    const initials = a.is_all ? '∞' : _initials(label);
+    return `<button class="email-pro-account ${active ? 'active' : ''}" data-account-id="${_esc(a.id || '')}" data-account-label="${_esc(label)}">
+      <span class="email-pro-avatar" style="--avatar-color:${_senderColor(label)}">${_esc(initials)}</span>
       <span class="email-pro-account-text"><strong>${_esc(label)}</strong><small>${_esc(sub)}</small></span>
     </button>`;
   }).join('');
   box.querySelectorAll('.email-pro-account').forEach(btn => {
     btn.addEventListener('click', async () => {
       st.accountId = btn.dataset.accountId || null;
-      st.accountName = btn.textContent.trim();
-      await loadFolders();
+      st.accountName = btn.dataset.accountLabel || (st.accountId ? btn.textContent.trim() : 'All');
+      st.folder = 'INBOX';
+      st.folderAccountId = null;
+      st.filter = 'all';
+      st.query = '';
+      const search = el('email-pro-search');
+      if (search) search.value = '';
+      await loadNav();
       await loadMessages({ reset: true, force: true });
     });
   });
@@ -435,6 +531,31 @@ function folderIcon(name) {
   return '▤';
 }
 
+
+function renderTags() {
+  const box = el('email-pro-tags');
+  if (!box) return;
+  const tags = st.tags || [];
+  if (!tags.length) {
+    box.innerHTML = '<div class="email-pro-sidebar-empty">No tags found yet.</div>';
+    return;
+  }
+  box.innerHTML = tags.map(tag => {
+    const filter = tagFilterValue(tag);
+    const active = st.filter === filter;
+    return `<button class="email-pro-tag ${active ? 'active' : ''}" data-filter="${_esc(filter)}">
+      <span>#</span><span><strong>${_esc(tag)}</strong><small>tag filter</small></span>
+    </button>`;
+  }).join('');
+  box.querySelectorAll('.email-pro-tag').forEach(btn => {
+    btn.addEventListener('click', () => {
+      st.filter = btn.dataset.filter || 'all';
+      document.querySelectorAll('.email-pro-chip[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === st.filter));
+      renderTags();
+      loadMessages({ reset: true, force: true });
+    });
+  });
+}
 function renderFolders() {
   const box = el('email-pro-folders');
   if (!box) return;
@@ -442,14 +563,23 @@ function renderFolders() {
     box.innerHTML = '<div class="email-pro-sidebar-loading">Loading folders…</div>';
     return;
   }
-  box.innerHTML = (st.folders || ['INBOX']).map(f => `
-    <button class="email-pro-folder ${f === st.folder ? 'active' : ''}" data-folder="${_esc(f)}">
-      <span>${folderIcon(f)}</span><span>${_esc(folderDisplayName(f))}</span>
-    </button>
-  `).join('');
+  const items = st.folderItems?.length ? st.folderItems : [{ name: 'INBOX', account_id: st.accountId || null, account_name: st.accountName || 'Account' }];
+  box.innerHTML = items.map(item => {
+    const active = String(item.name) === String(st.folder) && String(item.account_id || '') === String(st.folderAccountId || '');
+    const sub = item.unified ? 'All accounts' : (item.account_name || item.name);
+    return `<button class="email-pro-folder ${active ? 'active' : ''}" data-folder="${_esc(item.name)}" data-account-id="${_esc(item.account_id || '')}">
+      <span>${folderIcon(item.name)}</span>
+      <span class="email-pro-folder-text"><strong>${_esc(folderDisplayName(item.name))}</strong><small>${_esc(sub)}</small></span>
+    </button>`;
+  }).join('');
   box.querySelectorAll('.email-pro-folder').forEach(btn => {
     btn.addEventListener('click', () => {
       st.folder = btn.dataset.folder || 'INBOX';
+      st.folderAccountId = btn.dataset.accountId || null;
+      st.filter = 'all';
+      document.querySelectorAll('.email-pro-chip[data-filter]').forEach(b => b.classList.toggle('active', b.dataset.filter === 'all'));
+      renderFolders();
+      renderTags();
       loadMessages({ reset: true, force: true });
     });
   });
@@ -460,7 +590,7 @@ function renderMessageList() {
   const folderLabel = el('email-pro-folder-label');
   const count = el('email-pro-count-label');
   const loadMoreBtn = el('email-pro-load-more');
-  if (folderLabel) folderLabel.textContent = folderDisplayName(st.folder);
+  if (folderLabel) { const item = currentFolderItem(); folderLabel.textContent = item?.unified ? `${folderDisplayName(st.folder)} · All accounts` : `${folderDisplayName(st.folder)}${item?.account_name ? ` · ${item.account_name}` : ''}`; }
   if (count) count.textContent = `${st.messages.length}${st.total ? ` of ${st.total}` : ''} message${st.messages.length === 1 ? '' : 's'}`;
   if (loadMoreBtn) {
     loadMoreBtn.hidden = !!st.query || !hasMore();
@@ -478,18 +608,18 @@ function renderMessageList() {
   list.querySelectorAll('.email-pro-message').forEach(row => {
     row.addEventListener('click', e => {
       if (e.target.closest('input,button')) return;
-      const msg = st.messages.find(m => String(m.uid) === String(row.dataset.uid));
+      const msg = st.messages.find(m => messageKey(m) === row.dataset.key);
       if (msg) selectMessage(msg);
     });
     row.querySelector('.email-pro-row-check')?.addEventListener('change', e => {
-      const uid = String(row.dataset.uid);
-      if (e.target.checked) st.selected.add(uid); else st.selected.delete(uid);
-      row.classList.toggle('selected', st.selected.has(uid));
+      const key = String(row.dataset.key || '');
+      if (e.target.checked) st.selected.add(key); else st.selected.delete(key);
+      row.classList.toggle('selected', st.selected.has(key));
       updateBulkState();
     });
     row.querySelector('.email-pro-row-star')?.addEventListener('click', async e => {
       e.stopPropagation();
-      const msg = st.messages.find(m => String(m.uid) === String(row.dataset.uid));
+      const msg = st.messages.find(m => messageKey(m) === row.dataset.key);
       if (msg) await toggleStar(msg);
     });
   });
@@ -501,13 +631,25 @@ function skeletonRows() {
 
 function renderMessageRow(m) {
   const uid = String(m.uid);
-  const active = String(st.activeUid || '') === uid;
-  const selected = st.selected.has(uid);
+  const key = messageKey(m);
+  const active = st.activeKey === key;
+  const selected = st.selected.has(key);
   const unread = !m.is_read;
   const tags = Array.isArray(m.tags) ? m.tags : [];
   const preview = m.cached_summary || m.snippet || m.to || m.cc || '';
+  const accountLabel = !st.accountId && m.account_name ? `<span class="email-pro-row-account">${_esc(m.account_name)}</span>` : '';
+  if (st.viewMode === 'table') {
+    return `
+      <article class="email-pro-message email-pro-message-table ${active ? 'active' : ''} ${selected ? 'selected' : ''} ${unread ? 'unread' : ''}" data-uid="${_esc(uid)}" data-key="${_esc(key)}">
+        <div class="email-pro-row-left"><input class="email-pro-row-check" type="checkbox" ${selected ? 'checked' : ''} aria-label="Select message" /><button class="email-pro-row-star ${m.is_flagged ? 'active' : ''}" title="Star" aria-label="Star">★</button></div>
+        <div class="email-pro-table-from"><span>${_esc(senderName(m))}</span>${accountLabel}</div>
+        <div class="email-pro-table-subject"><strong>${_esc(m.subject || '(no subject)')}</strong><small>${m.has_attachments ? '📎 ' : ''}${_esc(preview)}</small></div>
+        <div class="email-pro-table-tags">${tags.slice(0, 3).map(t => `<span>${_esc(t)}</span>`).join('')}</div>
+        <div class="email-pro-table-date">${_esc(fmtDate(m))}</div>
+      </article>`;
+  }
   return `
-    <article class="email-pro-message ${active ? 'active' : ''} ${selected ? 'selected' : ''} ${unread ? 'unread' : ''}" data-uid="${_esc(uid)}">
+    <article class="email-pro-message ${active ? 'active' : ''} ${selected ? 'selected' : ''} ${unread ? 'unread' : ''}" data-uid="${_esc(uid)}" data-key="${_esc(key)}">
       <div class="email-pro-row-left">
         <input class="email-pro-row-check" type="checkbox" ${selected ? 'checked' : ''} aria-label="Select message" />
         <button class="email-pro-row-star ${m.is_flagged ? 'active' : ''}" title="Star" aria-label="Star">★</button>
@@ -519,7 +661,7 @@ function renderMessageRow(m) {
           <span class="email-pro-row-date">${_esc(fmtDate(m))}</span>
         </div>
         <div class="email-pro-row-subject">${_esc(m.subject || '(no subject)')}</div>
-        <div class="email-pro-row-preview">${m.has_attachments ? '<span class="email-pro-attach">📎</span>' : ''}${_esc(preview)}</div>
+        <div class="email-pro-row-preview">${accountLabel}${m.has_attachments ? '<span class="email-pro-attach">📎</span>' : ''}${_esc(preview)}</div>
         ${tags.length ? `<div class="email-pro-row-tags">${tags.slice(0, 4).map(t => `<span>${_esc(t)}</span>`).join('')}</div>` : ''}
       </div>
     </article>
@@ -534,23 +676,24 @@ function updateBulkState() {
   });
   const cb = el('email-pro-select-all');
   if (cb) {
-    cb.checked = st.messages.length > 0 && st.messages.every(m => st.selected.has(String(m.uid)));
+    cb.checked = st.messages.length > 0 && st.messages.every(m => st.selected.has(messageKey(m)));
     cb.indeterminate = st.selected.size > 0 && !cb.checked;
   }
 }
 
 async function selectMessage(m) {
   st.activeUid = String(m.uid);
+  st.activeKey = messageKey(m);
   st.activeMessage = m;
   renderMessageList();
   const reader = el('email-pro-reader');
   if (!reader) return;
   reader.innerHTML = `<div class="email-pro-reader-loading">Loading message…</div>`;
-  const key = messageKey(m.uid);
+  const key = messageKey(m);
   try {
     let data = st.bodies.get(key);
     if (!data) {
-      const res = await fetch(`${API_BASE}/api/email/read/${encodeURIComponent(m.uid)}?${folderQS()}`, { credentials: 'same-origin' });
+      const res = await fetch(`${API_BASE}/api/email/read/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { credentials: 'same-origin' });
       data = await res.json();
       if (data.error) throw new Error(data.error);
       st.bodies.set(key, data);
@@ -558,13 +701,93 @@ async function selectMessage(m) {
     st.activeMessage = { ...m, ...data };
     if (!m.is_read) {
       m.is_read = true;
-      fetch(`${API_BASE}/api/email/mark-read/${encodeURIComponent(m.uid)}?${folderQS()}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
+      fetch(`${API_BASE}/api/email/mark-read/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     }
     renderReader(st.activeMessage);
     renderMessageList();
   } catch (err) {
     reader.innerHTML = `<div class="email-pro-reader-error">${_esc(err.message || 'Unable to read message')}</div>`;
   }
+}
+
+
+
+function proxiedEmailImageUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return raw;
+  if (/^cid:/i.test(raw)) return raw;
+  if (/^https?:\/\//i.test(raw)) {
+    return `${API_BASE}/api/email/pro/image-proxy?url=${encodeURIComponent(raw)}`;
+  }
+  if (/^\/\//.test(raw)) {
+    return `${API_BASE}/api/email/pro/image-proxy?url=${encodeURIComponent(`https:${raw}`)}`;
+  }
+  return raw;
+}
+
+function proxiedSrcset(srcset) {
+  return String(srcset || '').split(',').map(part => {
+    const bits = part.trim().split(/\s+/);
+    if (!bits.length) return '';
+    bits[0] = proxiedEmailImageUrl(bits[0]);
+    return bits.join(' ');
+  }).filter(Boolean).join(', ');
+}
+
+function normalizeEmailHtml(rawHtml, data = {}) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = String(rawHtml || '');
+
+  // Remove active content but preserve normal marketing-email layout markup.
+  tpl.content.querySelectorAll('script, iframe, object, embed, form, input, button, textarea, select, meta').forEach(n => n.remove());
+
+  tpl.content.querySelectorAll('*').forEach(node => {
+    [...node.attributes].forEach(attr => {
+      const name = attr.name.toLowerCase();
+      const value = attr.value || '';
+      if (name.startsWith('on')) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if ((name === 'href' || name === 'src' || name === 'xlink:href') && /^\s*javascript:/i.test(value)) {
+        node.removeAttribute(attr.name);
+        return;
+      }
+      if (name === 'src') {
+        if (/^cid:/i.test(value)) {
+          const cid = value.replace(/^cid:/i, '').replace(/^<|>$/g, '').trim();
+          if (cid && data?.uid) {
+            node.setAttribute('src', `${API_BASE}/api/email/inline/${encodeURIComponent(data.uid)}/${encodeURIComponent(cid)}?${folderQS(data)}`);
+          } else {
+            node.setAttribute('data-missing-cid-src', value);
+            node.removeAttribute('src');
+          }
+        } else {
+          const proxied = proxiedEmailImageUrl(value);
+          if (proxied !== value) node.setAttribute('src', proxied);
+        }
+      }
+      if (name === 'srcset') {
+        node.setAttribute('srcset', proxiedSrcset(value));
+      }
+    });
+  });
+
+  // Let externally hosted images render, but make them lazy and visually contained.
+  tpl.content.querySelectorAll('img').forEach(img => {
+    const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-delayed-url');
+    if (!img.getAttribute('src') && lazySrc) {
+      img.setAttribute('src', proxiedEmailImageUrl(lazySrc));
+    }
+    if (img.getAttribute('srcset')) {
+      img.setAttribute('srcset', proxiedSrcset(img.getAttribute('srcset')));
+    }
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.referrerPolicy = 'no-referrer';
+  });
+
+  return tpl.innerHTML;
 }
 
 function renderReaderEmpty() {
@@ -577,12 +800,13 @@ function renderReader(data) {
   const reader = el('email-pro-reader');
   if (!reader) return;
   const body = data.body_html
-    ? _sanitizeHtml(data.body_html)
+    ? normalizeEmailHtml(data.body_html, data)
     : _escLinkify(data.body || data.text || '').replace(/\n/g, '<br>');
   reader.innerHTML = `
     <div class="email-pro-reader-head">
       <div class="email-pro-reader-subject">${_esc(data.subject || '(no subject)')}</div>
       <div class="email-pro-reader-actions">
+        <button class="email-pro-tool email-pro-reader-back" data-reader-action="back">← Back</button>
         <button class="email-pro-tool" data-reader-action="reply">Reply</button>
         <button class="email-pro-tool" data-reader-action="forward">Forward</button>
         <button class="email-pro-tool" data-reader-action="archive">Archive</button>
@@ -598,11 +822,19 @@ function renderReader(data) {
       </div>
     </div>
     ${Array.isArray(data.attachments) && data.attachments.length ? renderAttachments(data) : ''}
-    <div class="email-pro-reader-body">${body}</div>
+    <div class="email-pro-reader-body email-pro-html-body">${body}</div>
   `;
   reader.querySelectorAll('[data-reader-action]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const action = btn.dataset.readerAction;
+      if (action === 'back') {
+        st.activeUid = null;
+        st.activeKey = null;
+        st.activeMessage = null;
+        renderReaderEmpty();
+        renderMessageList();
+        return;
+      }
       if (action === 'reply') openCompose({ replyTo: data });
       else if (action === 'forward') openCompose({ forward: data });
       else if (action === 'archive') await singleAction(data, 'archive');
@@ -613,14 +845,14 @@ function renderReader(data) {
 
 function renderAttachments(data) {
   return `<div class="email-pro-attachments">${data.attachments.map((a, idx) => `
-    <a class="email-pro-attachment" href="/api/email/attachment/${encodeURIComponent(data.uid)}/${idx}?${folderQS()}" target="_blank" rel="noopener">📎 ${_esc(a.filename || `Attachment ${idx + 1}`)}</a>
+    <a class="email-pro-attachment" href="/api/email/attachment/${encodeURIComponent(data.uid)}/${idx}?${folderQS(data)}" target="_blank" rel="noopener">📎 ${_esc(a.filename || `Attachment ${idx + 1}`)}</a>
   `).join('')}</div>`;
 }
 
 async function toggleStar(m) {
   const endpoint = m.is_flagged ? 'unflag' : 'flag';
   try {
-    const res = await fetch(`${API_BASE}/api/email/${endpoint}/${encodeURIComponent(m.uid)}?${folderQS()}`, { method: 'POST', credentials: 'same-origin' });
+    const res = await fetch(`${API_BASE}/api/email/${endpoint}/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { method: 'POST', credentials: 'same-origin' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) throw new Error(data.error || 'Star update failed');
     m.is_flagged = !m.is_flagged;
@@ -632,25 +864,27 @@ async function toggleStar(m) {
 
 async function singleAction(m, action) {
   st.selected.clear();
-  st.selected.add(String(m.uid));
+  st.selected.add(messageKey(m));
   await bulkAction(action);
 }
 
 async function bulkAction(action) {
-  const ids = [...st.selected];
-  if (!ids.length) return;
+  const keys = [...st.selected];
+  if (!keys.length) return;
   if (action === 'delete') {
-    const ok = await styledConfirm?.(`Delete ${ids.length} message${ids.length === 1 ? '' : 's'}?`);
+    const ok = await styledConfirm?.(`Delete ${keys.length} message${keys.length === 1 ? '' : 's'}?`);
     if (ok === false) return;
   }
   setStatus(`${action}…`, true);
-  const calls = ids.map(uid => {
+  const calls = keys.map(key => {
+    const msg = st.messages.find(m => messageKey(m) === key);
+    if (!msg) return Promise.resolve({ ok: false });
     let url = '';
     let method = 'POST';
-    if (action === 'archive') url = `/api/email/archive/${encodeURIComponent(uid)}?${folderQS()}`;
-    if (action === 'delete') { url = `/api/email/delete/${encodeURIComponent(uid)}?${folderQS()}`; method = 'DELETE'; }
-    if (action === 'read') url = `/api/email/mark-read/${encodeURIComponent(uid)}?${folderQS()}`;
-    if (action === 'unread') url = `/api/email/mark-unread/${encodeURIComponent(uid)}?${folderQS()}`;
+    if (action === 'archive') url = `/api/email/archive/${encodeURIComponent(msg.uid)}?${folderQS(msg)}`;
+    if (action === 'delete') { url = `/api/email/delete/${encodeURIComponent(msg.uid)}?${folderQS(msg)}`; method = 'DELETE'; }
+    if (action === 'read') url = `/api/email/mark-read/${encodeURIComponent(msg.uid)}?${folderQS(msg)}`;
+    if (action === 'unread') url = `/api/email/mark-unread/${encodeURIComponent(msg.uid)}?${folderQS(msg)}`;
     return fetch(`${API_BASE}${url}`, { method, credentials: 'same-origin' }).catch(err => ({ ok: false, err }));
   });
   await Promise.all(calls);
@@ -697,7 +931,7 @@ function openCompose({ replyTo = null, forward = null } = {}) {
       cc: drawer.querySelector('#email-pro-compose-cc').value.trim() || null,
       subject: drawer.querySelector('#email-pro-compose-subject').value.trim(),
       body: drawer.querySelector('#email-pro-compose-body').value,
-      account_id: st.accountId || null,
+      account_id: effectiveAccountId(replyTo || forward || null) || st.accountId || null,
       in_reply_to: replyTo?.message_id || null,
       references: replyTo?.references || replyTo?.message_id || null,
     };
