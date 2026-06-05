@@ -728,7 +728,39 @@ export function initEmailLibrary(config) {
 
 export function isOpen() { return state._libOpen; }
 
+function _emailProPreference() {
+  // Default to Email Pro on first run. Users can explicitly opt out with
+  // localStorage.setItem('odysseus.emailPro.enabled', '0') or the Legacy toggle.
+  const value = localStorage.getItem('odysseus.emailPro.enabled');
+  return value == null ? true : value !== '0';
+}
+
+function _setEmailProPreference(enabled) {
+  localStorage.setItem('odysseus.emailPro.enabled', enabled ? '1' : '0');
+}
+
 export function openEmailLibrary(opts = {}) {
+  // Email Pro is the new Thunderbird-inspired shell. Keep the legacy modal
+  // available via opts.legacy or localStorage override during rollout.
+  const emailProEnabled = _emailProPreference();
+  if (!opts?.legacy && emailProEnabled) {
+    import('./emailPro/index.js')
+      .then(mod => {
+        if (!mod || typeof mod.openEmailProLibrary !== 'function') {
+          throw new Error('Email Pro module loaded but did not export openEmailProLibrary()');
+        }
+        return mod.openEmailProLibrary(opts);
+      })
+      .catch(err => {
+        console.error('Email Pro failed to open; falling back to legacy email library:', err);
+        // Do not permanently disable Email Pro on a transient import/runtime error.
+        // The old behavior wrote odysseus.emailPro.enabled=0, causing every future
+        // first click to open the legacy inbox until the user manually fixed storage.
+        sessionStorage.setItem('odysseus.emailPro.lastError', String(err && (err.stack || err.message) || err));
+        openEmailLibrary({ ...opts, legacy: true, emailProFailed: true });
+      });
+    return;
+  }
   // Force-clean any stale state from previous attempts
   const existing = document.getElementById('email-lib-modal');
   if (existing) existing.remove();
@@ -781,6 +813,7 @@ export function openEmailLibrary(opts = {}) {
           <span id="email-lib-stats" class="memory-count" style="font-size:0.6em;opacity:0.6;font-weight:normal;margin-left:8px;position:relative;top:-2px"></span>
         </h4>
         <div class="email-lib-header-actions" style="display:flex;align-items:center;gap:8px;">
+          <button class="memory-toolbar-btn" id="email-lib-pro-toggle" title="Switch to Email Pro">Email Pro</button>
           <button class="close-btn" id="email-lib-close">\u2716</button>
         </div>
       </div>
@@ -935,6 +968,11 @@ export function openEmailLibrary(opts = {}) {
 
   // Wire events
   document.getElementById('email-lib-close').addEventListener('click', closeEmailLibrary);
+  document.getElementById('email-lib-pro-toggle')?.addEventListener('click', () => {
+    _setEmailProPreference(true);
+    closeEmailLibrary();
+    openEmailLibrary({ account_id: state._libAccountId, folder: state._libFolder });
+  });
 
   // Clicking the modal header (anywhere except buttons/inputs) collapses
   // any currently-expanded email card and returns to the inbox list view.
