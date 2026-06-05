@@ -36654,3 +36654,168 @@ body.theme-frosted .modal {
 .email-pro-reader-body.email-pro-html-body img[src*="/api/email/pro/image-proxy"] {
   background: transparent;
 }
+
+
+/* Mail Pro dock minimize: use the shared bottom minimized chip instead of folding the window. */
+.email-pro-modal.email-pro-docked {
+  display: none !important;
+}
+.minimized-dock-chip.email-pro-dock-chip {
+  border-color: rgba(138,223,255,.35);
+  background: color-mix(in srgb, var(--email-pro-surface-2, #111827) 88%, var(--email-pro-accent, #8adfff) 12%);
+}
+.minimized-dock-chip.email-pro-dock-chip:hover {
+  border-color: rgba(138,223,255,.62);
+  background: color-mix(in srgb, var(--email-pro-surface-2, #111827) 78%, var(--email-pro-accent, #8adfff) 22%);
+}
+.minimized-dock-chip.email-pro-dock-chip .minimized-dock-x {
+  margin-left: 2px;
+  opacity: .65;
+  font-weight: 800;
+  line-height: 1;
+}
+.minimized-dock-chip.email-pro-dock-chip .minimized-dock-x:hover {
+  opacity: 1;
+  color: #ff7b9a;
+}
+
+/* Mail Pro device cache controls */
+.email-pro-cache-clear {
+  opacity: .82;
+}
+.email-pro-cache-clear:hover {
+  opacity: 1;
+}
+.email-pro-status.busy::after {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--email-pro-accent, #8adfff);
+  box-shadow: 0 0 10px var(--email-pro-accent, #8adfff);
+}
+.email-pro-reader-body.email-pro-html-body img[data-mail-pro-image-cached="1"] {
+  image-rendering: auto;
+}
+
+
+/* Mail Pro theme sync: inherit Odysseus/custom theme tokens instead of fixed cyan/dark palette. */
+.email-pro-modal {
+  --email-pro-theme-accent: var(--accent, var(--red));
+  --email-pro-theme-bg: var(--bg);
+  --email-pro-theme-fg: var(--fg);
+  --email-pro-theme-panel: var(--panel);
+  --email-pro-theme-border: var(--border);
+  --email-pro-border: color-mix(in srgb, var(--email-pro-theme-accent) 34%, var(--email-pro-theme-border) 66%);
+  --email-pro-border-strong: color-mix(in srgb, var(--email-pro-theme-accent) 58%, var(--email-pro-theme-border) 42%);
+  --email-pro-surface: color-mix(in srgb, var(--email-pro-theme-panel) 82%, var(--email-pro-theme-bg) 18%);
+  --email-pro-surface-2: color-mix(in srgb, var(--email-pro-theme-panel) 70%, var(--email-pro-theme-bg) 30%);
+  --email-pro-surface-3: color-mix(in srgb, var(--email-pro-theme-panel) 56%, var(--email-pro-theme-accent) 14%, var(--email-pro-theme-bg) 30%);
+  --email-pro-accent: var(--email-pro-theme-accent);
+  --email-pro-danger: var(--color-error, var(--red));
+  --email-pro-muted: color-mix(in srgb, var(--email-pro-theme-fg) 62%, transparent);
+  color: var(--email-pro-theme-fg);
+}
+
+.email-pro-window {
+  background:
+    radial-gradient(circle at 18% 0%, color-mix(in srgb, var(--email-pro-accent) 13%, transparent), transparent 34%),
+    var(--email-pro-surface) !important;
+  border-color: var(--email-pro-border-strong) !important;
+}
+
+.email-pro-titlebar,
+.email-pro-toolbar,
+.email-pro-quickbar {
+  background: color-mix(in srgb, var(--email-pro-theme-panel) 82%, var(--email-pro-theme-bg) 18%);
+}
+
+.email-pro-app-icon,
+.email-pro-primary,
+.email-pro-chip.active,
+.email-pro-account.active,
+.email-pro-folder.active,
+.email-pro-tag.active,
+.email-pro-mode-toggle .active,
+.email-pro-reader-back,
+.email-pro-cache-btn {
+  background: color-mix(in srgb, var(--email-pro-accent) 18%, var(--email-pro-surface-2)) !important;
+  border-color: var(--email-pro-border-strong) !important;
+  color: color-mix(in srgb, var(--email-pro-theme-fg) 88%, var(--email-pro-accent) 12%) !important;
+}
+
+.email-pro-primary:hover,
+.email-pro-tool:hover:not(:disabled),
+.email-pro-icon-btn:hover,
+.email-pro-chip:hover,
+.email-pro-load-more:hover,
+.email-pro-account:hover,
+.email-pro-folder:hover,
+.email-pro-tag:hover {
+  background: color-mix(in srgb, var(--email-pro-accent) 14%, var(--email-pro-surface-2)) !important;
+  border-color: var(--email-pro-border-strong) !important;
+}
+
+.email-pro-search,
+.email-pro-select,
+.email-pro-compose-fields input,
+.email-pro-compose-drawer textarea {
+  background: color-mix(in srgb, var(--email-pro-theme-panel) 76%, var(--email-pro-theme-bg) 24%) !important;
+  color: var(--email-pro-theme-fg) !important;
+  border-color: var(--email-pro-border) !important;
+}
+
+.email-pro-search:focus,
+.email-pro-select:focus,
+.email-pro-compose-fields input:focus,
+.email-pro-compose-drawer textarea:focus {
+  border-color: var(--email-pro-border-strong) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--email-pro-accent) 18%, transparent) !important;
+}
+
+.email-pro-sidebar,
+.email-pro-list-head,
+.email-pro-list-foot,
+.email-pro-reader-head,
+.email-pro-compose-head {
+  background: color-mix(in srgb, var(--email-pro-theme-panel) 74%, var(--email-pro-theme-bg) 26%) !important;
+}
+
+.email-pro-message {
+  background: color-mix(in srgb, var(--email-pro-theme-panel) 62%, transparent) !important;
+}
+.email-pro-message:hover {
+  background: color-mix(in srgb, var(--email-pro-accent) 10%, var(--email-pro-theme-panel)) !important;
+}
+.email-pro-message.active,
+.email-pro-message.selected {
+  background: color-mix(in srgb, var(--email-pro-accent) 18%, var(--email-pro-theme-panel)) !important;
+  box-shadow: inset 3px 0 0 var(--email-pro-accent) !important;
+}
+
+.email-pro-message.unread::after,
+.email-pro-status.busy::before {
+  background: var(--email-pro-accent) !important;
+  box-shadow: 0 0 12px var(--email-pro-accent) !important;
+}
+
+.email-pro-row-star.active {
+  color: var(--warn, #f0ad4e) !important;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--warn, #f0ad4e) 45%, transparent) !important;
+}
+
+.email-pro-reader-body.email-pro-html-body {
+  background: color-mix(in srgb, var(--email-pro-theme-panel) 88%, var(--email-pro-theme-bg) 12%) !important;
+}
+
+.minimized-dock-chip.email-pro-dock-chip {
+  border-color: var(--email-pro-border-strong, color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border))) !important;
+  background: color-mix(in srgb, var(--panel) 84%, var(--accent, var(--red)) 16%) !important;
+  color: var(--fg) !important;
+}
+.minimized-dock-chip.email-pro-dock-chip:hover {
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 70%, var(--border)) !important;
+  background: color-mix(in srgb, var(--panel) 72%, var(--accent, var(--red)) 28%) !important;
+}

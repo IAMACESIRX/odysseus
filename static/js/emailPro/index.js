@@ -14,6 +14,7 @@ import { folderDisplayName, sortedFolders } from '../emailInbox.js';
 import { showToast, styledConfirm } from '../ui.js';
 import { makeWindowDraggable } from '../windowDrag.js';
 import { _esc, _escLinkify, _formatBubbleDate, _senderColor, _initials, _sanitizeHtml } from '../emailLibrary/utils.js';
+import { warmCache, navKey, listKey as cacheListKey, bodyKey as cacheBodyKey, getNav, setNav, getList, setList, getBody, setBody, patchCachedMessage, removeCachedMessages, cacheImagesIn, clearMailProCache } from './cache.js';
 
 const API_BASE = window.location.origin;
 const LIMIT = 50;
@@ -52,7 +53,11 @@ const st = {
   readerPane: localStorage.getItem(PANE_KEY) || 'right',
   viewMode: localStorage.getItem(VIEW_MODE_KEY) || 'cards',
   searchTimer: null,
+  cachePainted: false,
+  currentListCacheKey: '',
 };
+
+warmCache();
 
 function effectiveAccountId(message = null) {
   return message?.account_id || st.folderAccountId || st.accountId || null;
@@ -146,6 +151,63 @@ function hasMore() {
 function modal() { return document.getElementById('email-pro-modal'); }
 function el(id) { return document.getElementById(id); }
 
+function emailProDock() {
+  let dock = document.getElementById('minimized-dock');
+  if (!dock) {
+    dock = document.createElement('div');
+    dock.id = 'minimized-dock';
+    document.body.appendChild(dock);
+  }
+  return dock;
+}
+
+function emailProDockIcon() {
+  return '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>';
+}
+
+function removeEmailProDockChip() {
+  document.querySelectorAll('.minimized-dock-chip[data-modal-id="email-pro-modal"]').forEach(chip => chip.remove());
+}
+
+function restoreEmailProFromDock() {
+  const root = modal();
+  if (root) {
+    root.classList.remove('email-pro-docked');
+    root.hidden = false;
+    root.style.display = '';
+  }
+  removeEmailProDockChip();
+}
+
+function minimizeEmailProToDock() {
+  const root = modal();
+  if (!root) return;
+
+  const dock = emailProDock();
+  let chip = dock.querySelector('.minimized-dock-chip[data-modal-id="email-pro-modal"]');
+  if (!chip) {
+    chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'minimized-dock-chip email-pro-dock-chip';
+    chip.dataset.modalId = 'email-pro-modal';
+    chip.title = 'Restore Email Pro';
+    chip.innerHTML = `${emailProDockIcon()}<span class="minimized-dock-label">Email Pro</span><span class="minimized-dock-x" title="Close Email Pro" aria-label="Close Email Pro">×</span>`;
+    chip.addEventListener('click', e => {
+      if (e.target?.classList?.contains('minimized-dock-x')) {
+        e.stopPropagation();
+        closeEmailProLibrary();
+        return;
+      }
+      restoreEmailProFromDock();
+    });
+    dock.appendChild(chip);
+  }
+
+  root.classList.add('email-pro-docked');
+  root.style.display = 'none';
+}
+
+
 export async function openEmailProLibrary(opts = {}) {
   closeEmailProLibrary();
   st.open = true;
@@ -170,12 +232,14 @@ export async function openEmailProLibrary(opts = {}) {
   try { makeWindowDraggable?.(node.querySelector('.email-pro-window'), node.querySelector('.email-pro-titlebar')); } catch (_) {}
   wireShell(node);
   renderAll();
+  await paintCachedNav();
+  await paintCachedMessages();
   await loadAccounts();
-  await loadFolders();
-  await loadMessages({ reset: true });
+  await loadMessages({ reset: true, background: st.cachePainted });
 }
 
 export function closeEmailProLibrary() {
+  removeEmailProDockChip();
   const m = modal();
   if (m) m.remove();
   st.open = false;
@@ -202,6 +266,7 @@ function renderShell() {
       <div class="email-pro-toolbar">
         <button class="email-pro-primary" id="email-pro-compose">Compose</button>
         <button class="email-pro-tool" id="email-pro-refresh">Refresh</button>
+        <button class="email-pro-tool email-pro-cache-clear" id="email-pro-clear-cache" title="Clear this device mail cache">Clear cache</button>
         <button class="email-pro-tool" id="email-pro-archive" disabled>Archive</button>
         <button class="email-pro-tool" id="email-pro-delete" disabled>Delete</button>
         <button class="email-pro-tool" id="email-pro-read" disabled>Mark read</button>
@@ -271,7 +336,7 @@ function renderShell() {
 
 function wireShell(root) {
   el('email-pro-close')?.addEventListener('click', closeEmailProLibrary);
-  el('email-pro-min')?.addEventListener('click', () => root.classList.toggle('email-pro-minimized'));
+  el('email-pro-min')?.addEventListener('click', () => minimizeEmailProToDock());
   el('email-pro-mode-simple')?.addEventListener('click', async () => {
     localStorage.setItem(MODE_KEY, 'simple');
     localStorage.setItem(ENABLED_KEY, '0');
@@ -280,6 +345,16 @@ function wireShell(root) {
     legacy.openEmailLibrary({ legacy: true, account_id: st.accountId, folder: st.folder });
   });
   el('email-pro-refresh')?.addEventListener('click', () => loadMessages({ reset: true, force: true }));
+  el('email-pro-clear-cache')?.addEventListener('click', async () => {
+    const ok = await styledConfirm?.('Clear Mail Pro cache on this device?', { confirmText: 'Clear cache', cancelText: 'Cancel', danger: false });
+    if (ok === false) return;
+    await clearMailProCache();
+    st.bodies.clear();
+    st.cachePainted = false;
+    showToast?.('Mail Pro device cache cleared');
+    await loadNav();
+    await loadMessages({ reset: true, force: true });
+  });
   el('email-pro-compose')?.addEventListener('click', () => openCompose());
   el('email-pro-load-more')?.addEventListener('click', () => loadMore());
   el('email-pro-select-all')?.addEventListener('change', e => {
@@ -369,6 +444,51 @@ function setStatus(text, busy = false) {
   s.classList.toggle('busy', busy);
 }
 
+function currentListCacheKey() {
+  return cacheListKey({
+    accountId: st.accountId || null,
+    folder: st.folder,
+    folderAccountId: st.folderAccountId || null,
+    filter: st.filter,
+    query: st.query,
+  });
+}
+
+async function paintCachedNav() {
+  const cached = await getNav(navKey(st.accountId || null));
+  if (!cached) return false;
+  st.accounts = cached.accounts || [];
+  st.folderItems = sortedFolderItems(cached.folder_items || (cached.folders || ['INBOX']).map(name => ({ name, account_id: st.accountId || null, account_name: st.accountName || 'Account' })));
+  st.folders = st.folderItems.map(item => item.name);
+  st.tags = mergeTags(Array.isArray(cached.tags) ? cached.tags : []);
+  st.views = Array.isArray(cached.views) ? cached.views : [];
+  renderAccounts();
+  renderTags();
+  renderFolders();
+  return true;
+}
+
+async function paintCachedMessages() {
+  const key = currentListCacheKey();
+  const cached = await getList(key);
+  if (!cached || !Array.isArray(cached.emails)) return false;
+  st.currentListCacheKey = key;
+  st.messages = cached.emails || [];
+  st.total = Number(cached.total ?? st.messages.length) || st.messages.length;
+  st.offset = st.messages.length;
+  st.cachePainted = true;
+  setStatus(`Cached · ${st.messages.length}${st.total ? ` of ${st.total}` : ''}`);
+  renderAll();
+  return true;
+}
+
+async function saveCurrentListCache(data = null) {
+  const key = currentListCacheKey();
+  st.currentListCacheKey = key;
+  await setList(key, data || { emails: st.messages, total: st.total, folder: st.folder, offset: st.offset, cached_at: Date.now() });
+}
+
+
 async function loadNav(opts = {}) {
   st.foldersLoading = true;
   renderAccounts();
@@ -379,6 +499,7 @@ async function loadNav(opts = {}) {
     const res = await fetch(`${API_BASE}/api/email/pro/nav${qs}`, { credentials: 'same-origin' });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
+    await setNav(navKey(st.accountId || null), data);
     st.accounts = data.accounts || [];
     st.folderItems = sortedFolderItems(data.folder_items || (data.folders || ['INBOX']).map(name => ({ name, account_id: st.accountId || null, account_name: st.accountName || 'Account' })));
     st.folders = st.folderItems.map(item => item.name);
@@ -393,10 +514,13 @@ async function loadNav(opts = {}) {
     }
   } catch (err) {
     console.error('Email Pro navigation load failed', err);
-    st.accounts = [];
-    st.folderItems = [{ name: 'INBOX', account_id: null, account_name: 'All accounts', unified: true }];
-    st.folders = ['INBOX'];
-    st.tags = DEFAULT_TAGS.slice();
+    const painted = await paintCachedNav();
+    if (!painted) {
+      st.accounts = [];
+      st.folderItems = [{ name: 'INBOX', account_id: null, account_name: 'All accounts', unified: true }];
+      st.folders = ['INBOX'];
+      st.tags = DEFAULT_TAGS.slice();
+    }
   } finally {
     st.foldersLoading = false;
     renderAccounts();
@@ -413,21 +537,24 @@ async function loadFolders() {
   await loadNav();
 }
 
-async function loadMessages({ reset = false, force = false } = {}) {
+async function loadMessages({ reset = false, force = false, background = false } = {}) {
   if (st.loading) return;
   st.loading = true;
   if (reset) {
     st.offset = 0;
-    st.messages = [];
-    st.total = 0;
+    if (!background) {
+      st.messages = [];
+      st.total = 0;
+    }
     st.selected.clear();
     st.activeUid = null;
     st.activeKey = null;
     st.activeMessage = null;
     renderReaderEmpty();
+    if (!background) await paintCachedMessages();
   }
   renderMessageList();
-  setStatus('Loading mail…', true);
+  setStatus(background ? 'Refreshing cached mail…' : 'Loading mail…', true);
   try {
     const params = new URLSearchParams();
     params.set('folder', st.folder);
@@ -453,7 +580,9 @@ async function loadMessages({ reset = false, force = false } = {}) {
     st.messages = reset || st.query ? incoming : [...st.messages, ...incoming];
     st.total = Number(data.total ?? st.messages.length) || st.messages.length;
     st.offset = st.messages.length;
-    setStatus(st.query ? `Search: ${st.messages.length} result${st.messages.length === 1 ? '' : 's'}` : `${st.messages.length} of ${st.total}`);
+    await saveCurrentListCache({ ...data, emails: st.messages, total: st.total, offset: st.offset });
+    st.cachePainted = false;
+    setStatus(st.query ? `Search: ${st.messages.length} result${st.messages.length === 1 ? '' : 's'}` : `Updated · ${st.messages.length} of ${st.total}`);
     renderAll();
     const pending = st.activeUid || null;
     if (pending) {
@@ -462,8 +591,9 @@ async function loadMessages({ reset = false, force = false } = {}) {
     }
   } catch (err) {
     console.error(err);
-    setStatus(err.message || 'Mail load failed');
-    showToast?.(err.message || 'Mail load failed');
+    const painted = st.messages.length > 0 || await paintCachedMessages();
+    setStatus(painted ? 'Offline/cache view' : (err.message || 'Mail load failed'));
+    if (!painted) showToast?.(err.message || 'Mail load failed');
     renderAll();
   } finally {
     st.loading = false;
@@ -691,19 +821,27 @@ async function selectMessage(m) {
   reader.innerHTML = `<div class="email-pro-reader-loading">Loading message…</div>`;
   const key = messageKey(m);
   try {
-    let data = st.bodies.get(key);
-    if (!data) {
-      const res = await fetch(`${API_BASE}/api/email/read/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { credentials: 'same-origin' });
-      data = await res.json();
-      if (data.error) throw new Error(data.error);
+    let data = st.bodies.get(key) || await getBody(cacheBodyKey({ ...m, folder: m.folder || st.folder }));
+    if (data) {
       st.bodies.set(key, data);
+      st.activeMessage = { ...m, ...data };
+      renderReader(st.activeMessage);
+      setStatus('Cached message · refreshing…', true);
     }
+    const res = await fetch(`${API_BASE}/api/email/read/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { credentials: 'same-origin' });
+    const fresh = await res.json();
+    if (fresh.error) throw new Error(fresh.error);
+    data = fresh;
+    st.bodies.set(key, data);
+    await setBody(cacheBodyKey({ ...m, folder: m.folder || st.folder }), data);
     st.activeMessage = { ...m, ...data };
     if (!m.is_read) {
       m.is_read = true;
+      patchCachedMessage(st.currentListCacheKey || currentListCacheKey(), messageKey, m, { is_read: true }).catch(() => {});
       fetch(`${API_BASE}/api/email/mark-read/${encodeURIComponent(m.uid)}?${folderQS(m)}`, { method: 'POST', credentials: 'same-origin' }).catch(() => {});
     }
     renderReader(st.activeMessage);
+    cacheImagesIn(el('email-pro-reader')).catch(() => {});
     renderMessageList();
   } catch (err) {
     reader.innerHTML = `<div class="email-pro-reader-error">${_esc(err.message || 'Unable to read message')}</div>`;
@@ -824,6 +962,7 @@ function renderReader(data) {
     ${Array.isArray(data.attachments) && data.attachments.length ? renderAttachments(data) : ''}
     <div class="email-pro-reader-body email-pro-html-body">${body}</div>
   `;
+  cacheImagesIn(reader).catch(() => {});
   reader.querySelectorAll('[data-reader-action]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const action = btn.dataset.readerAction;
@@ -856,6 +995,8 @@ async function toggleStar(m) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) throw new Error(data.error || 'Star update failed');
     m.is_flagged = !m.is_flagged;
+    patchCachedMessage(st.currentListCacheKey || currentListCacheKey(), messageKey, m, { is_flagged: m.is_flagged }).catch(() => {});
+    saveCurrentListCache().catch(() => {});
     renderMessageList();
   } catch (err) {
     showToast?.(err.message || 'Star update failed');
@@ -888,8 +1029,20 @@ async function bulkAction(action) {
     return fetch(`${API_BASE}${url}`, { method, credentials: 'same-origin' }).catch(err => ({ ok: false, err }));
   });
   await Promise.all(calls);
+  if (action === 'read' || action === 'unread') {
+    const isRead = action === 'read';
+    st.messages = st.messages.map(m => keys.includes(messageKey(m)) ? { ...m, is_read: isRead } : m);
+    await saveCurrentListCache();
+  }
+  if (action === 'archive' || action === 'delete') {
+    st.messages = st.messages.filter(m => !keys.includes(messageKey(m)));
+    st.total = Math.max(0, st.total - keys.length);
+    await saveCurrentListCache();
+  }
   st.selected.clear();
-  await loadMessages({ reset: true, force: true });
+  renderMessageList();
+  updateBulkState();
+  loadMessages({ reset: true, force: true, background: true }).catch(() => {});
 }
 
 function openCompose({ replyTo = null, forward = null } = {}) {
